@@ -26,7 +26,7 @@ jobs:
       - name: Stream to YouTube (1 ảnh tĩnh + tự retry khi crash)
         env:
           STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
-          IMAGE_PATH: images/background.webp
+          IMAGE_PATH: images/1.jpeg
         run: |
           END_TIME=$(( $(date +%s) + 18000 ))   # 5 tiếng
 
