@@ -9,7 +9,7 @@ on:
 
 concurrency:
   group: youtube-stream
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   JOB_DURATION_SECONDS: 17820
