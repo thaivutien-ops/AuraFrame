@@ -9,11 +9,11 @@ on:
 
 concurrency:
   group: youtube-stream
-  # Bật true để job mới (từ cron/API) tự động thay thế job cũ, giúp gối đầu luồng không bị ngắt kết nối
+  # Bật true để job mới tự động ngắt và thay thế job cũ, giúp gối đầu luồng liên tục
   cancel-in-progress: true
 
 env:
-  JOB_DURATION_SECONDS: 19800 # Thiết lập chạy 5 tiếng 30 phút giống file Single để gối đầu an toàn
+  JOB_DURATION_SECONDS: 19800 # Thời gian chạy 5 tiếng 30 phút để gối đầu an toàn
 
 jobs:
   stream:
@@ -29,7 +29,35 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
 
-      - name: Stream to YouTube (Slideshow lặp vô hạn)
+      - name: Tạo danh sách ảnh chuẩn hóa
+        run: |
+          IMG_DIR="images"
+          LIST_FILE="images_list.txt"
+          > "$LIST_FILE"
+
+          # Tìm toàn bộ file .webp trong thư mục images
+          FILES=$(find "$IMG_DIR" -maxdepth 1 -type f -iname "*.webp" | sort -V)
+          
+          if [ -z "$FILES" ]; then
+            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục $IMG_DIR"
+            exit 1
+          fi
+
+          # Ghi danh sách ảnh vào file txt, mỗi ảnh hiển thị cố định 15 giây
+          for f in $FILES; do
+            ABS_PATH=$(realpath "$f")
+            echo "file '$ABS_PATH'" >> "$LIST_FILE"
+            echo "duration 15" >> "$LIST_FILE"
+          done
+          
+          # Quy tắc của FFmpeg concat: bắt buộc lặp lại file cuối cùng một lần nữa ở cuối danh sách
+          LAST_FILE=$(echo "$FILES" | tail -n 1)
+          ABS_LAST_PATH=$(realpath "$LAST_FILE")
+          echo "file '$ABS_LAST_PATH'" >> "$LIST_FILE"
+          
+          echo "📊 Đã khởi tạo thành công danh sách ảnh phối cảnh."
+
+      - name: Stream to YouTube (Tối ưu hóa không Scale)
         env:
           STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
         run: |
@@ -45,13 +73,11 @@ jobs:
             REMAINING=$(( END_TIME - NOW ))
             echo "▶️ $(date): Khởi động FFmpeg Slideshow. Thời gian còn lại: ${REMAINING} giây."
 
-            # THÔNG SỐ CẤU HÌNH QUAN TRỌNG:
-            # 1. -framerate 0.05: Cứ 20 giây sẽ tự chuyển sang ảnh .webp tiếp theo (1 / 0.05 = 20s). Bạn có thể đổi thành 0.1 nếu muốn 10s đổi 1 ảnh.
-            # 2. -stream_loop -1: Tự động lặp lại danh sách ảnh từ đầu sau khi chạy hết thư mục.
-            # 3. -vf scale...pad...: Tự động co giãn + chèn viền đen nếu ảnh lệch size (tránh crash stream khi đổi ảnh khác độ phân giải).
-            
-            stdbuf -oL -eL timeout --signal=SIGINT "$REMAINING" ffmpeg -re -framerate 0.05 -stream_loop -1 -pattern_type glob -i 'images/*.webp' \
-              -f lavfi -i anullsrc=cl=stereo:r=44100 \
+            # Đã lược bỏ hoàn toàn bộ lọc -vf để giảm tải CPU về mức tối thiểu
+            # Giữ nguyên preset ultrafast và các thông số encoding ổn định giống file Single
+            stdbuf -oL -eL timeout --signal=SIGINT "$REMAINING" ffmpeg \
+              -re -stream_loop -1 -f concat -safe 0 -i images_list.txt \
+              -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
               -c:v libx264 -preset ultrafast -tune stillimage \
               -b:v 4000k -maxrate 4000k -bufsize 8000k \
               -pix_fmt yuv420p -g 40 -r 20 \
@@ -66,7 +92,7 @@ jobs:
             if [ "$NOW" -ge "$END_TIME" ]; then
               break
             else
-              echo "⚠️ Luồng bị ngắt sớm do sự cố mạng/YouTube ngắt kết nối. Thử lại sau 5 giây..."
+              echo "⚠️ Luồng bị ngắt sớm do mạng hoặc sự cố bên ngoài. Thử lại sau 5 giây..."
               sleep 5
             fi
           done
@@ -81,5 +107,4 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/dispatches \
             -d '{"event_type":"continue-stream"}'
           
-          # Chờ 10s để lệnh dispatch được gửi đi an toàn trước khi kết thúc job cũ
           sleep 10
