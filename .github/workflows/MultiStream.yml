@@ -55,7 +55,6 @@ jobs:
               -c:v libx264 -preset ultrafast -tune stillimage \
               -b:v 4000k -maxrate 4000k -bufsize 8000k \
               -pix_fmt yuv420p -g 40 -r 20 \
-              -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" \
               -c:a aac -b:a 128k -ar 44100 \
               -progress pipe:1 \
               -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
