@@ -26,6 +26,15 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
 
+      - name: Kiểm tra ảnh có đồng nhất kích thước không
+        run: |
+          IMG_DIR="images"
+          echo "--- Kích thước từng ảnh ---"
+          for f in "$IMG_DIR"/*.webp; do
+            SIZE=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$f")
+            echo "$f: $SIZE"
+          done
+
       - name: Tạo danh sách ảnh (tự tính duration mỗi ảnh)
         run: |
           IMG_DIR="images"
@@ -68,11 +77,11 @@ jobs:
             echo "▶️ Khởi động ffmpeg, còn ${REMAINING}s"
 
             stdbuf -oL -eL timeout --signal=SIGINT "$REMAINING" ffmpeg -re -stream_loop -1 -f concat -safe 0 -i images_list.txt \
-              -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
+              -f lavfi -i anullsrc=cl=stereo:r=44100 \
               -c:v libx264 -preset veryfast -tune stillimage \
-              -b:v 5000k -minrate 5000k -maxrate 6000k -bufsize 9000k \
-              -x264opts nal-hrd=cbr -pix_fmt yuv420p -g 60 -r 30 -vsync cfr \
-              -c:a aac -b:a 128k \
+              -b:v 4500k -maxrate 4500k -bufsize 9000k \
+              -pix_fmt yuv420p -g 60 -r 30 \
+              -c:a aac -b:a 128k -ar 44100 \
               -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
 
             EXIT_CODE=$?
