@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  JOB_DURATION_SECONDS: 17820   # 4h57p — chừa 3 phút đệm trước khi GitHub force-kill ở mốc 5h
+  JOB_DURATION_SECONDS: 17820
 
 jobs:
   stream:
@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 340
 
     steps:
-      - name: Checkout repo (lấy thư mục images/)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Install ffmpeg
@@ -36,25 +36,19 @@ jobs:
           NUM_IMAGES=$(echo "$FILES" | wc -l)
 
           if [ -z "$FILES" ] || [ "$NUM_IMAGES" -eq 0 ]; then
-            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục $IMG_DIR"
+            echo "❌ Không tìm thấy ảnh .webp"
             exit 1
           fi
 
-          # tự tính thời gian mỗi ảnh = thời gian job / số ảnh, để 1 vòng lặp khớp đúng 1 job
           IMAGE_DURATION=$(( JOB_DURATION_SECONDS / NUM_IMAGES ))
-
-          echo "📊 Số ảnh tìm thấy: $NUM_IMAGES"
-          echo "📊 Thời gian mỗi ảnh: ${IMAGE_DURATION}s ($(( IMAGE_DURATION / 60 ))p $(( IMAGE_DURATION % 60 ))s)"
+          echo "📊 Số ảnh: $NUM_IMAGES | ${IMAGE_DURATION}s/ảnh"
 
           for f in $FILES; do
             echo "file '$f'" >> "$LIST_FILE"
             echo "duration $IMAGE_DURATION" >> "$LIST_FILE"
           done
-
           LAST_FILE=$(echo "$FILES" | tail -n 1)
           echo "file '$LAST_FILE'" >> "$LIST_FILE"
-
-          echo "--- Danh sách ảnh sẽ phát ---"
           cat "$LIST_FILE"
 
       - name: Stream to YouTube (loop ảnh + tự retry khi crash)
@@ -66,38 +60,38 @@ jobs:
           while true; do
             NOW=$(date +%s)
             if [ "$NOW" -ge "$END_TIME" ]; then
-              echo "✅ Đã đủ thời gian cho job này, dừng lại để chuyển job kế tiếp."
+              echo "✅ Đủ thời gian job."
               break
             fi
 
             REMAINING=$(( END_TIME - NOW ))
-            echo "▶️ $(date): Khởi động ffmpeg, còn ${REMAINING}s trong job này"
+            echo "▶️ Khởi động ffmpeg, còn ${REMAINING}s"
 
             timeout --signal=SIGINT "$REMAINING" ffmpeg -re -stream_loop -1 -f concat -safe 0 -i images_list.txt \
               -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
-              -c:v libx264 -preset veryfast -b:v 4500k -minrate 4500k -maxrate 4500k -bufsize 9000k \
+              -c:v libx264 -preset veryfast -tune stillimage \
+              -b:v 6000k -minrate 6000k -maxrate 6000k -bufsize 12000k \
               -x264opts nal-hrd=cbr -pix_fmt yuv420p -g 60 -r 30 -vsync cfr \
               -c:a aac -b:a 128k \
               -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
 
             EXIT_CODE=$?
-            echo "⏹️ $(date): ffmpeg dừng với exit code $EXIT_CODE"
+            echo "⏹️ ffmpeg dừng, exit code $EXIT_CODE"
 
             NOW=$(date +%s)
             if [ "$NOW" -ge "$END_TIME" ]; then
-              echo "✅ Dừng đúng lịch, không phải crash."
+              echo "✅ Dừng đúng lịch."
               break
             else
-              echo "⚠️ ffmpeg dừng SỚM (còn $(( END_TIME - NOW ))s) — nghi ngờ crash, tự khởi động lại sau 5s..."
+              echo "⚠️ Dừng sớm — crash, retry sau 5s..."
               sleep 5
             fi
           done
 
-          echo "Chờ 15s để YouTube giải phóng ingestion cũ..."
           sleep 15
 
       - name: Trigger job kế tiếp
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           curl -s -X POST \
             -H "Authorization: token ${{ secrets.GH_PAT }}" \
