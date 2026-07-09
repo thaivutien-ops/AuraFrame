@@ -1,4 +1,4 @@
-name: 24-7 YouTube Stream (image slideshow - loop per image)
+name: 24-7 YouTube Stream (filter_complex concat - no delay)
 
 on:
   workflow_dispatch:
@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  JOB_DURATION_SECONDS: 17820   # 4h57p, chừa đệm trước mốc 5h
-  DEFAULT_IMAGE_DURATION: 1200  # 20 phút/ảnh mặc định, tự điều chỉnh nếu gần hết giờ job
+  JOB_DURATION_SECONDS: 17820
+  IMAGE_DURATION: 1200   # giây/ảnh, chỉnh tùy ý
 
 jobs:
   stream:
@@ -27,82 +27,67 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
 
-      - name: Kiểm tra ảnh có đồng nhất kích thước không
-        run: |
-          echo "--- Kích thước từng ảnh trong images/ ---"
-          for f in images/*.webp; do
-            SIZE=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$f")
-            echo "$f: $SIZE"
-          done
-
-      - name: Stream to YouTube (loop từng ảnh, tự retry khi crash)
+      - name: Stream to YouTube (1 process ffmpeg, không list file, không delay)
         env:
           STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
         run: |
           END_TIME=$(( $(date +%s) + JOB_DURATION_SECONDS ))
 
-          IMAGES=$(find images -maxdepth 1 -type f -iname "*.webp" | sort -V)
-          NUM_IMAGES=$(echo "$IMAGES" | wc -l)
+          # Đọc danh sách ảnh vào mảng Bash (thay cho list file)
+          mapfile -t IMAGES < <(find images -maxdepth 1 -type f -iname "*.webp" | sort -V)
+          NUM_IMAGES=${#IMAGES[@]}
 
-          if [ -z "$IMAGES" ] || [ "$NUM_IMAGES" -eq 0 ]; then
-            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục images/"
+          if [ "$NUM_IMAGES" -eq 0 ]; then
+            echo "❌ Không tìm thấy ảnh .webp trong thư mục images/"
             exit 1
           fi
-
-          echo "📊 Tìm thấy $NUM_IMAGES ảnh, mỗi ảnh mặc định ${DEFAULT_IMAGE_DURATION}s"
+          echo "📊 Tìm thấy $NUM_IMAGES ảnh, mỗi ảnh ${IMAGE_DURATION}s"
 
           while true; do
             NOW=$(date +%s)
             if [ "$NOW" -ge "$END_TIME" ]; then
-              echo "✅ Đã đủ thời gian job, dừng lại để chuyển job kế tiếp."
+              echo "✅ Đủ thời gian job."
               break
             fi
 
-            for IMG in $IMAGES; do
-              NOW=$(date +%s)
-              if [ "$NOW" -ge "$END_TIME" ]; then
-                echo "✅ Hết giờ job giữa vòng lặp ảnh, dừng lại."
-                break 2
-              fi
-
-              REMAINING=$(( END_TIME - NOW ))
-              # nếu thời gian còn lại của job ít hơn thời lượng mặc định, dùng thời gian còn lại
-              if [ "$REMAINING" -lt "$DEFAULT_IMAGE_DURATION" ]; then
-                THIS_DURATION=$REMAINING
-              else
-                THIS_DURATION=$DEFAULT_IMAGE_DURATION
-              fi
-
-              echo "▶️ $(date): Đang phát '$IMG' trong ${THIS_DURATION}s (còn ${REMAINING}s trong job)"
-
-              timeout --signal=SIGINT "$THIS_DURATION" ffmpeg -re -loop 1 -i "$IMG" \
-                -f lavfi -i anullsrc=cl=stereo:r=44100 \
-                -c:v libx264 -preset veryfast -tune stillimage \
-                -b:v 4500k -maxrate 4500k -bufsize 9000k \
-                -pix_fmt yuv420p -g 60 -r 30 \
-                -c:a aac -b:a 128k -ar 44100 \
-                -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
-
-              EXIT_CODE=$?
-              echo "⏹️ ffmpeg dừng cho ảnh '$IMG', exit code $EXIT_CODE"
-
-              NOW=$(date +%s)
-              if [ "$NOW" -ge "$END_TIME" ]; then
-                echo "✅ Hết giờ job, dừng lại."
-                break 2
-              fi
-
-              # nếu exit code khác 0 và không phải do hết giờ tự nhiên -> có thể crash, retry ngay ảnh này
-              if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 124 ]; then
-                echo "⚠️ ffmpeg dừng bất thường (exit $EXIT_CODE) — thử lại ảnh này sau 5s..."
-                sleep 5
-              fi
+            # --- Xây dựng lệnh ffmpeg động, nạp trực tiếp từng ảnh làm input riêng ---
+            INPUT_ARGS=()
+            FILTER_INPUTS=""
+            for i in "${!IMAGES[@]}"; do
+              INPUT_ARGS+=(-loop 1 -t "$IMAGE_DURATION" -i "${IMAGES[$i]}")
+              FILTER_INPUTS+="[${i}:v]"
             done
 
-            echo "🔁 Đã phát hết 1 vòng $NUM_IMAGES ảnh, quay lại ảnh đầu tiên..."
+            FILTER_COMPLEX="${FILTER_INPUTS}concat=n=${NUM_IMAGES}:v=1:a=0[outv]"
+            AUDIO_INPUT_INDEX=$NUM_IMAGES   # index của input audio (lavfi), nằm ngay sau các ảnh
+
+            REMAINING=$(( END_TIME - NOW ))
+            echo "▶️ $(date): Khởi động ffmpeg cho trọn $NUM_IMAGES ảnh, còn ${REMAINING}s trong job"
+
+            timeout --signal=SIGINT "$REMAINING" ffmpeg -re \
+              "${INPUT_ARGS[@]}" \
+              -f lavfi -i anullsrc=cl=stereo:r=44100 \
+              -filter_complex "$FILTER_COMPLEX" \
+              -map "[outv]" -map "${AUDIO_INPUT_INDEX}:a" \
+              -c:v libx264 -preset veryfast -tune stillimage \
+              -b:v 4500k -maxrate 4500k -bufsize 9000k \
+              -pix_fmt yuv420p -g 60 -r 30 \
+              -c:a aac -b:a 128k -ar 44100 \
+              -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+
+            EXIT_CODE=$?
+            echo "⏹️ ffmpeg dừng, exit code $EXIT_CODE"
+
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END_TIME" ]; then
+              echo "✅ Dừng đúng lịch."
+              break
+            else
+              echo "⚠️ Dừng sớm (hết 1 vòng $NUM_IMAGES ảnh hoặc crash) — khởi động lại vòng mới sau 3s..."
+              sleep 3
+            fi
           done
 
-          echo "Chờ 15s để YouTube giải phóng ingestion cũ..."
           sleep 15
 
       - name: Trigger job kế tiếp
