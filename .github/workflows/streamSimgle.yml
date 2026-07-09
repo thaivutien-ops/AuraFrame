@@ -31,7 +31,7 @@ jobs:
       - name: Stream to YouTube
         env:
           STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
-          IMAGE_PATH: images/1.jpeg
+          IMAGE_PATH: images/01.webp
         run: |
           # Thiết lập chạy trong 5 tiếng 30 phút (19800 giây) để gối đầu an toàn
           END_TIME=$(( $(date +%s) + 19800 ))
