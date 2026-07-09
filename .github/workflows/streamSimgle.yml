@@ -1,4 +1,4 @@
-name: 24Stream (24/7 Optimized)
+name: StreamSingle
 
 on:
   workflow_dispatch:
