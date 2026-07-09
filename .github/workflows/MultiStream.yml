@@ -1,0 +1,106 @@
+name: 24-7 YouTube Stream (image slideshow)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [continue-stream]
+  schedule:
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: youtube-stream
+  cancel-in-progress: false
+
+env:
+  JOB_DURATION_SECONDS: 17820   # 4h57p — chừa 3 phút đệm trước khi GitHub force-kill ở mốc 5h
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Checkout repo (lấy thư mục images/)
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Tạo danh sách ảnh (tự tính duration mỗi ảnh)
+        run: |
+          IMG_DIR="images"
+          LIST_FILE="images_list.txt"
+          > "$LIST_FILE"
+
+          FILES=$(find "$IMG_DIR" -maxdepth 1 -type f -iname "*.webp" | sort -V)
+          NUM_IMAGES=$(echo "$FILES" | wc -l)
+
+          if [ -z "$FILES" ] || [ "$NUM_IMAGES" -eq 0 ]; then
+            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục $IMG_DIR"
+            exit 1
+          fi
+
+          # tự tính thời gian mỗi ảnh = thời gian job / số ảnh, để 1 vòng lặp khớp đúng 1 job
+          IMAGE_DURATION=$(( JOB_DURATION_SECONDS / NUM_IMAGES ))
+
+          echo "📊 Số ảnh tìm thấy: $NUM_IMAGES"
+          echo "📊 Thời gian mỗi ảnh: ${IMAGE_DURATION}s ($(( IMAGE_DURATION / 60 ))p $(( IMAGE_DURATION % 60 ))s)"
+
+          for f in $FILES; do
+            echo "file '$f'" >> "$LIST_FILE"
+            echo "duration $IMAGE_DURATION" >> "$LIST_FILE"
+          done
+
+          LAST_FILE=$(echo "$FILES" | tail -n 1)
+          echo "file '$LAST_FILE'" >> "$LIST_FILE"
+
+          echo "--- Danh sách ảnh sẽ phát ---"
+          cat "$LIST_FILE"
+
+      - name: Stream to YouTube (loop ảnh + tự retry khi crash)
+        env:
+          STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
+        run: |
+          END_TIME=$(( $(date +%s) + JOB_DURATION_SECONDS ))
+
+          while true; do
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END_TIME" ]; then
+              echo "✅ Đã đủ thời gian cho job này, dừng lại để chuyển job kế tiếp."
+              break
+            fi
+
+            REMAINING=$(( END_TIME - NOW ))
+            echo "▶️ $(date): Khởi động ffmpeg, còn ${REMAINING}s trong job này"
+
+            timeout --signal=SIGINT "$REMAINING" ffmpeg -re -stream_loop -1 -f concat -safe 0 -i images_list.txt \
+              -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
+              -c:v libx264 -preset veryfast -b:v 4500k -minrate 4500k -maxrate 4500k -bufsize 9000k \
+              -x264opts nal-hrd=cbr -pix_fmt yuv420p -g 60 -r 30 -vsync cfr \
+              -c:a aac -b:a 128k \
+              -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+
+            EXIT_CODE=$?
+            echo "⏹️ $(date): ffmpeg dừng với exit code $EXIT_CODE"
+
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END_TIME" ]; then
+              echo "✅ Dừng đúng lịch, không phải crash."
+              break
+            else
+              echo "⚠️ ffmpeg dừng SỚM (còn $(( END_TIME - NOW ))s) — nghi ngờ crash, tự khởi động lại sau 5s..."
+              sleep 5
+            fi
+          done
+
+          echo "Chờ 15s để YouTube giải phóng ingestion cũ..."
+          sleep 15
+
+      - name: Trigger job kế tiếp
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type":"continue-stream"}'
