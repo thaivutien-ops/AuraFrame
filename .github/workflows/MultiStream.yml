@@ -1,4 +1,4 @@
-name: 24-7 YouTube Stream (image slideshow)
+name: 24-7 YouTube Stream (image slideshow - loop per image)
 
 on:
   workflow_dispatch:
@@ -9,11 +9,11 @@ on:
 
 concurrency:
   group: youtube-stream
-  # Bật true để job mới tự động ngắt và thay thế job cũ, giúp gối đầu luồng liên tục
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
-  JOB_DURATION_SECONDS: 19800 # Thời gian chạy 5 tiếng 30 phút để gối đầu an toàn
+  JOB_DURATION_SECONDS: 17820   # 4h57p, chừa đệm trước mốc 5h
+  DEFAULT_IMAGE_DURATION: 1200  # 20 phút/ảnh mặc định, tự điều chỉnh nếu gần hết giờ job
 
 jobs:
   stream:
@@ -25,86 +25,91 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Kiểm tra ảnh có đồng nhất kích thước không
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
-
-      - name: Tạo danh sách ảnh chuẩn hóa
-        run: |
-          IMG_DIR="images"
-          LIST_FILE="images_list.txt"
-          > "$LIST_FILE"
-
-          # Tìm toàn bộ file .webp trong thư mục images
-          FILES=$(find "$IMG_DIR" -maxdepth 1 -type f -iname "*.webp" | sort -V)
-          
-          if [ -z "$FILES" ]; then
-            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục $IMG_DIR"
-            exit 1
-          fi
-
-          # Ghi danh sách ảnh vào file txt, mỗi ảnh hiển thị cố định 15 giây
-          for f in $FILES; do
-            ABS_PATH=$(realpath "$f")
-            echo "file '$ABS_PATH'" >> "$LIST_FILE"
-            echo "duration 15" >> "$LIST_FILE"
+          echo "--- Kích thước từng ảnh trong images/ ---"
+          for f in images/*.webp; do
+            SIZE=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$f")
+            echo "$f: $SIZE"
           done
-          
-          # Quy tắc của FFmpeg concat: bắt buộc lặp lại file cuối cùng một lần nữa ở cuối danh sách
-          LAST_FILE=$(echo "$FILES" | tail -n 1)
-          ABS_LAST_PATH=$(realpath "$LAST_FILE")
-          echo "file '$ABS_LAST_PATH'" >> "$LIST_FILE"
-          
-          echo "📊 Đã khởi tạo thành công danh sách ảnh phối cảnh."
 
-      - name: Stream to YouTube (Tối ưu hóa không Scale)
+      - name: Stream to YouTube (loop từng ảnh, tự retry khi crash)
         env:
           STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
         run: |
           END_TIME=$(( $(date +%s) + JOB_DURATION_SECONDS ))
 
+          IMAGES=$(find images -maxdepth 1 -type f -iname "*.webp" | sort -V)
+          NUM_IMAGES=$(echo "$IMAGES" | wc -l)
+
+          if [ -z "$IMAGES" ] || [ "$NUM_IMAGES" -eq 0 ]; then
+            echo "❌ Không tìm thấy ảnh .webp nào trong thư mục images/"
+            exit 1
+          fi
+
+          echo "📊 Tìm thấy $NUM_IMAGES ảnh, mỗi ảnh mặc định ${DEFAULT_IMAGE_DURATION}s"
+
           while true; do
             NOW=$(date +%s)
             if [ "$NOW" -ge "$END_TIME" ]; then
-              echo "✅ Đã chạy đủ thời gian an toàn cho job này. Chuẩn bị bàn giao."
+              echo "✅ Đã đủ thời gian job, dừng lại để chuyển job kế tiếp."
               break
             fi
 
-            REMAINING=$(( END_TIME - NOW ))
-            echo "▶️ $(date): Khởi động FFmpeg Slideshow. Thời gian còn lại: ${REMAINING} giây."
+            for IMG in $IMAGES; do
+              NOW=$(date +%s)
+              if [ "$NOW" -ge "$END_TIME" ]; then
+                echo "✅ Hết giờ job giữa vòng lặp ảnh, dừng lại."
+                break 2
+              fi
 
-            # Đã lược bỏ hoàn toàn bộ lọc -vf để giảm tải CPU về mức tối thiểu
-            # Giữ nguyên preset ultrafast và các thông số encoding ổn định giống file Single
-            stdbuf -oL -eL timeout --signal=SIGINT "$REMAINING" ffmpeg \
-              -re -stream_loop -1 -f concat -safe 0 -i images_list.txt \
-              -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
-              -c:v libx264 -preset ultrafast -tune stillimage \
-              -b:v 4000k -maxrate 4000k -bufsize 8000k \
-              -pix_fmt yuv420p -g 40 -r 20 \
-              -c:a aac -b:a 128k -ar 44100 \
-              -progress pipe:1 \
-              -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+              REMAINING=$(( END_TIME - NOW ))
+              # nếu thời gian còn lại của job ít hơn thời lượng mặc định, dùng thời gian còn lại
+              if [ "$REMAINING" -lt "$DEFAULT_IMAGE_DURATION" ]; then
+                THIS_DURATION=$REMAINING
+              else
+                THIS_DURATION=$DEFAULT_IMAGE_DURATION
+              fi
 
-            EXIT_CODE=$?
-            echo "⏹️ FFmpeg dừng với mã thoát: $EXIT_CODE"
+              echo "▶️ $(date): Đang phát '$IMG' trong ${THIS_DURATION}s (còn ${REMAINING}s trong job)"
 
-            NOW=$(date +%s)
-            if [ "$NOW" -ge "$END_TIME" ]; then
-              break
-            else
-              echo "⚠️ Luồng bị ngắt sớm do mạng hoặc sự cố bên ngoài. Thử lại sau 5 giây..."
-              sleep 5
-            fi
+              timeout --signal=SIGINT "$THIS_DURATION" ffmpeg -re -loop 1 -i "$IMG" \
+                -f lavfi -i anullsrc=cl=stereo:r=44100 \
+                -c:v libx264 -preset veryfast -tune stillimage \
+                -b:v 4500k -maxrate 4500k -bufsize 9000k \
+                -pix_fmt yuv420p -g 60 -r 30 \
+                -c:a aac -b:a 128k -ar 44100 \
+                -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+
+              EXIT_CODE=$?
+              echo "⏹️ ffmpeg dừng cho ảnh '$IMG', exit code $EXIT_CODE"
+
+              NOW=$(date +%s)
+              if [ "$NOW" -ge "$END_TIME" ]; then
+                echo "✅ Hết giờ job, dừng lại."
+                break 2
+              fi
+
+              # nếu exit code khác 0 và không phải do hết giờ tự nhiên -> có thể crash, retry ngay ảnh này
+              if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 124 ]; then
+                echo "⚠️ ffmpeg dừng bất thường (exit $EXIT_CODE) — thử lại ảnh này sau 5s..."
+                sleep 5
+              fi
+            done
+
+            echo "🔁 Đã phát hết 1 vòng $NUM_IMAGES ảnh, quay lại ảnh đầu tiên..."
           done
 
-      - name: Kích hoạt Luồng Tiếp Theo (Gối Đầu)
-        if: success()
+          echo "Chờ 15s để YouTube giải phóng ingestion cũ..."
+          sleep 15
+
+      - name: Trigger job kế tiếp
+        if: ${{ !cancelled() }}
         run: |
-          echo "🔄 Đang gọi API để kích hoạt job tiếp theo..."
           curl -s -X POST \
             -H "Authorization: token ${{ secrets.GH_PAT }}" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/${{ github.repository }}/dispatches \
             -d '{"event_type":"continue-stream"}'
-          
-          sleep 10
