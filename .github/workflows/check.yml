@@ -1,0 +1,47 @@
+name: Check Runner Specs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-specs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CPU Info
+        run: |
+          echo "===== CPU ====="
+          echo "Số nhân CPU (nproc): $(nproc)"
+          echo ""
+          lscpu
+          echo ""
+          echo "----- /proc/cpuinfo (model name) -----"
+          grep "model name" /proc/cpuinfo | head -1
+
+      - name: RAM Info
+        run: |
+          echo "===== RAM ====="
+          free -h
+
+      - name: Disk Info
+        run: |
+          echo "===== DISK ====="
+          df -h
+
+      - name: OS Info
+        run: |
+          echo "===== OS ====="
+          cat /etc/os-release
+          uname -a
+
+      - name: Network / Bandwidth test (tốc độ tải xuống thử)
+        run: |
+          echo "===== NETWORK SPEED TEST (ước lượng) ====="
+          curl -o /dev/null -s -w "Tốc độ tải: %{speed_download} bytes/s\nThời gian: %{time_total}s\n" \
+            https://raw.githubusercontent.com/actions/checkout/main/README.md
+
+      - name: Tổng hợp thông số quan trọng
+        run: |
+          echo "===== TÓM TẮT ====="
+          echo "CPU cores: $(nproc)"
+          echo "RAM total: $(free -h | awk '/^Mem:/{print $2}')"
+          echo "Disk available: $(df -h / | awk 'NR==2{print $4}')"
