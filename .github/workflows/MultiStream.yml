@@ -91,7 +91,8 @@ jobs:
           sleep 15
 
       - name: Trigger job kế tiếp
-        if: ${{ !cancelled() }}
+        #if: ${{ !cancelled() }}
+        if: success()
         run: |
           curl -s -X POST \
             -H "Authorization: token ${{ secrets.GH_PAT }}" \
