@@ -64,7 +64,7 @@ jobs:
             
             timeout --signal=SIGINT "$REMAINING" ffmpeg \
               "${INPUT_ARGS[@]}" \
-              -f lavfi -i anullsrc=cl=stereo:r=44100 \
+              -re -f lavfi -i anullsrc=cl=stereo:r=44100 \
               -filter_complex "$FILTER_COMPLEX" \
               -map "[outv]" -map "${AUDIO_INPUT_INDEX}:a" \
               -c:v libx264 -preset veryfast -tune stillimage \
