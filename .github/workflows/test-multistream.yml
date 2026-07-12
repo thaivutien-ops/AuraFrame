@@ -1,0 +1,86 @@
+name: 24-7 YouTube Stream (filter_complex concat - TEST 10s)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: youtube-stream
+  cancel-in-progress: false
+
+env:
+  JOB_DURATION_SECONDS: 120     # test ngắn: 2 phút tổng job
+  IMAGE_DURATION: 10            # test: 10 giây/ảnh
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Stream to YouTube (TEST)
+        env:
+          STREAM_KEY: ${{ secrets.YT_STREAM_KEY }}
+        run: |
+          END_TIME=$(( $(date +%s) + JOB_DURATION_SECONDS ))
+
+          mapfile -t IMAGES < <(find images -maxdepth 1 -type f -iname "*.webp" | sort -V)
+          NUM_IMAGES=${#IMAGES[@]}
+
+          if [ "$NUM_IMAGES" -eq 0 ]; then
+            echo "❌ Không tìm thấy ảnh .webp"
+            exit 1
+          fi
+          echo "📊 $NUM_IMAGES ảnh, ${IMAGE_DURATION}s/ảnh (TEST)"
+
+          while true; do
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END_TIME" ]; then
+              echo "✅ Đủ thời gian test."
+              break
+            fi
+
+            INPUT_ARGS=()
+            FILTER_INPUTS=""
+            for i in "${!IMAGES[@]}"; do
+              INPUT_ARGS+=(-loop 1 -t "$IMAGE_DURATION" -i "${IMAGES[$i]}")
+              FILTER_INPUTS+="[${i}:v]"
+            done
+
+            FILTER_COMPLEX="${FILTER_INPUTS}concat=n=${NUM_IMAGES}:v=1:a=0[outv]"
+            AUDIO_INPUT_INDEX=$NUM_IMAGES
+
+            REMAINING=$(( END_TIME - NOW ))
+            echo "▶️ $(date): Khởi động ffmpeg TEST, còn ${REMAINING}s"
+            echo "🔍 Filter: $FILTER_COMPLEX"
+
+            timeout --signal=SIGINT "$REMAINING" ffmpeg -re \
+              "${INPUT_ARGS[@]}" \
+              -f lavfi -i anullsrc=cl=stereo:r=44100 \
+              -filter_complex "$FILTER_COMPLEX" \
+              -map "[outv]" -map "${AUDIO_INPUT_INDEX}:a" \
+              -c:v libx264 -preset veryfast -tune stillimage \
+              -b:v 4500k -maxrate 4500k -bufsize 9000k \
+              -pix_fmt yuv420p -g 60 -r 30 \
+              -c:a aac -b:a 128k -ar 44100 \
+              -f flv "rtmp://a.rtmp.youtube.com/live2/$STREAM_KEY"
+
+            EXIT_CODE=$?
+            echo "⏹️ ffmpeg dừng, exit code $EXIT_CODE"
+
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$END_TIME" ]; then
+              echo "✅ Dừng đúng lịch test."
+              break
+            else
+              echo "⚠️ Dừng sớm — retry sau 3s..."
+              sleep 3
+            fi
+          done
+
+          echo "TEST XONG — không trigger job kế tiếp (không có bước curl)"
