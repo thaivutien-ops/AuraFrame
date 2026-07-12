@@ -52,17 +52,17 @@ jobs:
             INPUT_ARGS=()
             FILTER_INPUTS=""
             for i in "${!IMAGES[@]}"; do
-              INPUT_ARGS+=(-loop 1 -t "$IMAGE_DURATION" -i "${IMAGES[$i]}")
+              INPUT_ARGS+=(-re -loop 1 -t "$IMAGE_DURATION" -i "${IMAGES[$i]}")
               FILTER_INPUTS+="[${i}:v]"
             done
-
+            
             FILTER_COMPLEX="${FILTER_INPUTS}concat=n=${NUM_IMAGES}:v=1:a=0[outv]"
             AUDIO_INPUT_INDEX=$NUM_IMAGES
-
+            
             REMAINING=$(( END_TIME - NOW ))
             echo "▶️ $(date): Khởi động ffmpeg cho $NUM_IMAGES ảnh, còn ${REMAINING}s"
-
-            timeout --signal=SIGINT "$REMAINING" ffmpeg -re \
+            
+            timeout --signal=SIGINT "$REMAINING" ffmpeg \
               "${INPUT_ARGS[@]}" \
               -f lavfi -i anullsrc=cl=stereo:r=44100 \
               -filter_complex "$FILTER_COMPLEX" \
